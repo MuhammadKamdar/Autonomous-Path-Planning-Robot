@@ -1,0 +1,329 @@
+#!/usr/bin/env python
+
+# Copyright (c) 2011, Willow Garage, Inc.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#    * Redistributions of source code must retain the above copyright
+#      notice, this list of conditions and the following disclaimer.
+#    * Redistributions in binary form must reproduce the above copyright
+#      notice, this list of conditions and the following disclaimer in the
+#      documentation and/or other materials provided with the distribution.
+#    * Neither the name of the Willow Garage, Inc. nor the names of its
+#      contributors may be used to endorse or promote products derived from
+#       this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+import rospy
+import time
+import math
+from geometry_msgs.msg import Twist
+from sensor_msgs.msg import Illuminance, LaserScan
+from nav_msgs.msg import Odometry
+from time import sleep
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
+import sys, select, os
+if os.name == 'nt':
+  import msvcrt
+else:
+  import tty, termios
+
+BURGER_MAX_LIN_VEL = 0.22
+BURGER_MAX_ANG_VEL = 2.84
+
+WAFFLE_MAX_LIN_VEL = 0.26
+WAFFLE_MAX_ANG_VEL = 1.82
+
+LIN_VEL_STEP_SIZE = 0.01
+ANG_VEL_STEP_SIZE = 0.1
+
+# msg = """
+# Control Your TurtleBot3!
+# ---------------------------
+# Moving around:
+#         w
+#    a    s    d
+#         x
+
+# w/x : increase/decrease linear velocity (Burger : ~ 0.22, Waffle and Waffle Pi : ~ 0.26)
+# a/d : increase/decrease angular velocity (Burger : ~ 2.84, Waffle and Waffle Pi : ~ 1.82)
+
+# space key, s : force stop
+
+# CTRL-C to quit
+# """
+
+e = """
+Communications Failed
+"""
+def getKey():
+    if os.name == 'nt':
+      return msvcrt.getch()
+
+    tty.setraw(sys.stdin.fileno())
+    rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+    if rlist:
+        key = sys.stdin.read(1)
+    else:
+        key = ''
+
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+    return key
+
+def vels(target_linear_vel, target_angular_vel):
+    return "currently:\tlinear vel %s\t angular vel %s " % (target_linear_vel,target_angular_vel)
+
+def makeSimpleProfile(output, input, slop):
+    if input > output:
+        output = min( input, output + slop )
+    elif input < output:
+        output = max( input, output - slop )
+    else:
+        output = input
+
+    return output
+
+def constrain(input, low, high):
+    if input < low:
+      input = low
+    elif input > high:
+      input = high
+    else:
+      input = input
+
+    return input
+
+def checkLinearLimitVelocity(vel):
+    if turtlebot3_model == "burger":
+      vel = constrain(vel, -BURGER_MAX_LIN_VEL, BURGER_MAX_LIN_VEL)
+    elif turtlebot3_model == "waffle" or turtlebot3_model == "waffle_pi":
+      vel = constrain(vel, -WAFFLE_MAX_LIN_VEL, WAFFLE_MAX_LIN_VEL)
+    else:
+      vel = constrain(vel, -BURGER_MAX_LIN_VEL, BURGER_MAX_LIN_VEL)
+
+    return vel
+
+def checkAngularLimitVelocity(vel):
+    if turtlebot3_model == "burger":
+      vel = constrain(vel, -BURGER_MAX_ANG_VEL, BURGER_MAX_ANG_VEL)
+    elif turtlebot3_model == "waffle" or turtlebot3_model == "waffle_pi":
+      vel = constrain(vel, -WAFFLE_MAX_ANG_VEL, WAFFLE_MAX_ANG_VEL)
+    else:
+      vel = constrain(vel, -BURGER_MAX_ANG_VEL, BURGER_MAX_ANG_VEL)
+
+    return vel
+
+# def leftCallback(input):
+#   leftLightSensor = input.illuminance
+#   return leftLightSensor
+
+# def rightCallback(input):
+#   rightLightSensor = input.illuminance
+#   return rightLightSensor
+
+# def follower():
+#   rospy.Subscriber('/light_sensor_plugin/leftLightSensor', Illuminance, leftCallback)
+#   rospy.Subscriber('/light_sensor_plugin/lightSensor', Illuminance,rightCallback)
+odomPose = None
+def odometryCb(input):
+  odomPose = input.pose.pose
+
+leftLightSensorValue = None
+rightLightSensorValue = None
+rospy.init_node('turtlebot3_teleop')
+pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)  
+
+def objectAvoid(dt):
+  # kp = 15
+  # ki = 150
+  # tp = 0.01
+  # desX = 0.000001#-0.881204
+  # desY = 0.705191 #-1.401245
+  # integral = 0
+  # # errorThres = 2.5
+  
+  # print("Iceberg Detected")
+  # while(1):
+  #   if (getKey() == ' ' or getKey() == 's'):
+  #         print("STOOOPPP")
+  #         while (1):
+  #           twist.linear.x = 0.0; twist.linear.y = 0.0; twist.linear.z = 0.0
+  #           twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0.0
+  #           pub.publish(twist)
+  #           if (getKey() == ' ' or getKey() == 's'):
+  #             print("STAART")
+  #             twist.linear.x = tp; twist.linear.y = 0.0; twist.linear.z = 0.0
+  #             twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0.0
+  #             pub.publish(twist)
+  #             break
+  #   posX = rospy.wait_for_message('/odom', Odometry, None).pose.pose.position.x
+  #   posY = rospy.wait_for_message('/odom', Odometry, None).pose.pose.position.y
+  #   odomPose = rospy.wait_for_message('/odom', Odometry, None).pose.pose
+  #   orientation_list = [odomPose.orientation.x, odomPose.orientation.y, odomPose.orientation.z, odomPose.orientation.w]
+  #   (roll, pitch, yaw) = euler_from_quaternion(orientation_list)
+  #   phi = yaw
+  #   # posX = odomPose(0)
+  #   # posY = odomPose(1)
+  #   xError = desX - posX
+  #   yError = desY - posY
+  #   desPhi = math.atan2(xError, yError)
+  #   phiError = desPhi - phi
+  #   print("Phi Error: ", phiError)
+  #   twist = Twist()
+  #   if (phiError == 0):
+  #     integral = 0
+  #   else:
+  #     integral = integral + phiError*dt
+  #   print("Integral: ", integral)
+  #   twist.angular.z = kp*phiError + ki*integral
+  #   # if (abs(phiError) < errorThres):
+  #   #   print("Onwards")
+  #   twist.linear.x = tp
+  #   pub.publish(twist)
+  #   sleep(dt)
+
+  desX = 0.0
+  desY = 0.0
+  kp = 10
+  ki = 250
+  turnSpeed = 0.005
+  integral = 0
+  errorThreshold = 0.08
+  tp = 0.01
+  c = 4
+  print("Iceberg Detected")
+  while(1):
+    if (getKey() == ' ' or getKey() == 's'):
+      print("STOOOPPP")
+      while (1):
+        twist.linear.x = 0.0; twist.linear.y = 0.0; twist.linear.z = 0.0
+        twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0.0
+        pub.publish(twist)
+        if (getKey() == ' ' or getKey() == 's'):
+          print("STAART")
+          twist.linear.x = tp; twist.linear.y = 0.0; twist.linear.z = 0.0
+          twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0.0
+          pub.publish(twist)
+          break
+    # phi = rospy.wait_for_message('/odom', Odometry, None).pose.pose.orientation.z
+    odomPose = rospy.wait_for_message('/odom', Odometry, None).pose.pose
+    orientation_list = [odomPose.orientation.x, odomPose.orientation.y, odomPose.orientation.z, odomPose.orientation.w]
+    (roll, pitch, yaw) = euler_from_quaternion(orientation_list)
+    phi = yaw
+    posX = rospy.wait_for_message('/odom', Odometry, None).pose.pose.position.x
+    posY = rospy.wait_for_message('/odom', Odometry, None).pose.pose.position.y
+    xError = desX - posX
+    yError = desY - posY
+    desPhi = math.pi/c - math.atan2(yError,xError)
+    # print("desPhi = ", math.pi/c, "-  atan shit: ",math.atan2(xError,yError))
+    print("desPhi: ", desPhi)
+    phiError = desPhi - phi
+    print("phiError: ", phiError)
+    # integral = integral + phiError * dt
+    if (abs(phiError) < errorThreshold):
+      print("onward")
+      twist.linear.x = 0; twist.linear.y = 0.0; twist.linear.z = 0.0
+      twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0
+      pub.publish(twist)
+    linVel = rospy.wait_for_message("/odom",Odometry, None).twist.twist.linear.x
+    if (linVel <0.001):
+      twist.linear.x = 0.0; twist.linear.y = 0.0; twist.linear.z = 0.0
+      twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = kp*phiError
+    pub.publish(twist)
+    if (posX == desX and posY == desY):
+      twist.linear.x = 0.0; twist.linear.y = 0.0; twist.linear.z = 0.0
+      break
+    sleep(dt)
+  
+
+
+
+if __name__=="__main__":
+    if os.name != 'nt':
+        settings = termios.tcgetattr(sys.stdin)
+    # rospy.init_node('turtlebot3_teleop')
+    # pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
+    #rospy.Subscriber('odom',Odometry,odometryCb)
+    
+    turtlebot3_model = rospy.get_param("model", "burger")
+
+    desAngPos  = 0.0
+    #angPos = 0.0
+
+    kp = 27
+    ki = 250
+    tp = 0.01
+    lowTp = 0.01
+    highTp = 0.02
+    angPosStep = 1e-3
+    dt = 0.05
+    integral = 0
+    error = 0
+    
+    #try:
+    while(1):
+        twist = Twist()
+        if (getKey() == ' ' or getKey() == 's'):
+          print("STOOOPPP")
+          while (1):
+            twist.linear.x = 0.0; twist.linear.y = 0.0; twist.linear.z = 0.0
+            twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0.0
+            pub.publish(twist)
+            if (getKey() == ' ' or getKey() == 's'):
+              print("STAART")
+              twist.linear.x = tp; twist.linear.y = 0.0; twist.linear.z = 0.0
+              twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0.0
+              pub.publish(twist)
+              break
+        laserArray = rospy.wait_for_message('/scan',LaserScan,None).ranges
+        laserVal = min(laserArray)
+        print("Laser Value: ", laserVal)
+        if (laserVal < 0.6 and laserVal > 0.55):
+          objectAvoid(dt)
+          
+        leftLightSensorValue = rospy.wait_for_message('/light_sensor_plugin/leftLightSensor', Illuminance, None).illuminance
+        rightLightSensorValue = rospy.wait_for_message('/light_sensor_plugin/lightSensor', Illuminance, None).illuminance
+        odomPose = rospy.wait_for_message('/odom', Odometry, None).pose.pose
+        orientation_list = [odomPose.orientation.x, odomPose.orientation.y, odomPose.orientation.z, odomPose.orientation.w]
+        (roll, pitch, yaw) = euler_from_quaternion(orientation_list)
+        angPos = yaw
+
+        if (rightLightSensorValue > leftLightSensorValue):
+          desAngPos = angPos + angPosStep
+          tp = lowTp
+        elif(rightLightSensorValue < leftLightSensorValue):
+          desAngPos = angPos -angPosStep
+          tp = lowTp
+        elif(int(rightLightSensorValue) == int(leftLightSensorValue)):
+          desAngPos = 0
+          angPos = 0
+          integral=0
+          tp = highTp
+        
+        tempError = error
+        error = desAngPos - angPos
+        integral = (2/3)*integral + error*dt
+        if ((error == 0) or (tempError>0 and error<0) or (tempError<0 and error>0)):
+          integral = 0
+        twist.linear.x = tp; twist.linear.y = 0.0; twist.linear.z = 0.0
+        twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = kp*error + ki*integral
+
+        pub.publish(twist)
+        sleep(dt)
+
+    if os.name != 'nt':
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+

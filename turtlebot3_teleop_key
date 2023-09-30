@@ -1,0 +1,778 @@
+#!/usr/bin/env python 
+# Copyright (c) 2011, Willow Garage, Inc.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#    * Redistributions of source code must retain the above copyright
+#      notice, this list of conditions and the following disclaimer.
+#    * Redistributions in binary form must reproduce the above copyright
+#      notice, this list of conditions and the following disclaimer in the
+#      documentation and/or other materials provided with the distribution.
+#    * Neither the name of the Willow Garage, Inc. nor the names of its
+#      contributors may be used to endorse or promote products derived from
+#       this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+import rospy
+import numpy as np
+from geometry_msgs.msg import Twist
+from sensor_msgs.msg import Illuminance, LaserScan
+from gazebo_msgs.msg import ContactsState
+from nav_msgs.msg import Odometry
+from decimal import Decimal
+from tf.transformations import euler_from_quaternion, quaternion_from_euler
+import sys, select, os
+import math
+import time
+if os.name == 'nt':
+  import msvcrt
+else:
+  import tty, termios
+
+BURGER_MAX_LIN_VEL = 0.22
+BURGER_MAX_ANG_VEL = 2.84
+
+WAFFLE_MAX_LIN_VEL = 0.26
+WAFFLE_MAX_ANG_VEL = 1.82
+
+LIN_VEL_STEP_SIZE = 0.01
+ANG_VEL_STEP_SIZE = 0.1
+
+msg = """
+Control Your TurtleBot3!
+---------------------------
+Moving around:
+        w
+   a    s    d
+        x
+w/x : increase/decrease linear velocity (Burger : ~ 0.22, Waffle and Waffle Pi : ~ 0.26)
+a/d : increase/decrease angular velocity (Burger : ~ 2.84, Waffle and Waffle Pi : ~ 1.82)
+space key, s : force stop
+CTRL-C to quit
+"""
+
+e = """
+Communications Failed
+"""
+twist = Twist()
+rospy.init_node('turtlebot3_teleop')
+pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
+if os.name != 'nt':
+  settings = termios.tcgetattr(sys.stdin)
+
+    # rospy.init_node('turtlebot3_teleop')
+    # pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
+
+turtlebot3_model = rospy.get_param("model", "burger")
+
+def getKey():
+    if os.name == 'nt':
+      return msvcrt.getch()
+
+    tty.setraw(sys.stdin.fileno())
+    rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+    if rlist:
+        key = sys.stdin.read(1)
+    else:
+        key = ''
+
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+    return key
+
+def vels(target_linear_vel, target_angular_vel):
+    return "currently:\tlinear vel %s\t angular vel %s " % (target_linear_vel,target_angular_vel)
+
+def makeSimpleProfile(output, input, slop):
+    if input > output:
+        output = min( input, output + slop )
+    elif input < output:
+        output = max( input, output - slop )
+    else:
+        output = input
+
+    return output
+
+def constrain(input, low, high):
+    if input < low:
+      input = low
+    elif input > high:
+      input = high
+    else:
+      input = input
+
+    return input
+
+def checkLinearLimitVelocity(vel):
+    if turtlebot3_model == "burger":
+      vel = constrain(vel, -BURGER_MAX_LIN_VEL, BURGER_MAX_LIN_VEL)
+    elif turtlebot3_model == "waffle" or turtlebot3_model == "waffle_pi":
+      vel = constrain(vel, -WAFFLE_MAX_LIN_VEL, WAFFLE_MAX_LIN_VEL)
+    else:
+      vel = constrain(vel, -BURGER_MAX_LIN_VEL, BURGER_MAX_LIN_VEL)
+
+    return vel
+
+def checkAngularLimitVelocity(vel):
+    if turtlebot3_model == "burger":
+      vel = constrain(vel, -BURGER_MAX_ANG_VEL, BURGER_MAX_ANG_VEL)
+    elif turtlebot3_model == "waffle" or turtlebot3_model == "waffle_pi":
+      vel = constrain(vel, -WAFFLE_MAX_ANG_VEL, WAFFLE_MAX_ANG_VEL)
+    else:
+      vel = constrain(vel, -BURGER_MAX_ANG_VEL, BURGER_MAX_ANG_VEL)
+
+    return vel
+
+def getSystemTime():
+  seconds = float(time.time())
+  return seconds
+
+def move(val):
+  # Sets angular velocity to 0 and linear velocity to a fixed constant
+  twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0.0
+  velocity = 0.04
+  # Time = Distance / Speed
+  time_needed = abs(val) / (velocity)
+  forward = True
+  if (val > 0):
+    forward = True
+  else:
+    forward = False
+  # Get the start time (The time just before the robot starts moving)
+  start_time = getSystemTime()
+
+  # Check to see if the current system time is lower than time needed for the robot to move
+  while (not(getSystemTime() > start_time + time_needed)):
+    # Get the current System Time
+    current_time = getSystemTime()
+    if (forward == True):
+      twist.linear.x = velocity; twist.linear.y = 0.0; twist.linear.z = 0.0
+    else:
+      twist.linear.x = -velocity; twist.linear.y = 0.0; twist.linear.z = 0.0
+    pub.publish(twist)
+  twist.linear.x = 0.0; twist.linear.y = 0.0; twist.linear.z = 0.0
+  pub.publish(twist)
+  print("Stopped")
+
+# def rotate(deg):
+#   twist.linear.x = 0.0; twist.linear.y = 0.0; twist.linear.z = 0.0
+#   radian = (deg * (math.pi/180))
+#   ang_velocity = 0.05
+#   offset = 1
+#   clockwise = True
+#   if (radian > 0):
+#     clockwise = True
+#   else:
+#     clockwise = False
+#   time_needed = abs(radian) / ang_velocity
+#   start_time = getSystemTime()
+
+#   while (not(getSystemTime() > start_time + time_needed + offset)):
+#     print("Time Needed: " + str(time_needed) + "Current Time: " + str(getSystemTime() - start_time))
+#     if (clockwise == True):
+#       twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = ang_velocity
+#     else:
+#       twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = -ang_velocity
+#     pub.publish(twist)
+#   twist.angular.x = 0.0000000; twist.angular.y = 0.0; twist.angular.z = 0.0
+#   pub.publish(twist)
+#   print("Stopped")
+
+current_angle = 0
+roll = 0
+pitch = 0
+yaw = 0
+set_angle = 90
+
+def angleCorrection(angle):
+  global set_angle
+  set_angle = set_angle + angle
+  if (set_angle > 180):
+    difference = set_angle-180
+    set_angle = -180 + difference
+  elif (set_angle < -180):
+    difference = abs(set_angle)-180
+    set_angle = 180 - difference
+  return (set_angle * (math.pi/180))
+  
+
+def rotate(dAngle):
+  global roll, pitch, yaw
+  odomPose = rospy.wait_for_message('/odom', Odometry, None).pose.pose
+  orientation_list = [odomPose.orientation.x, odomPose.orientation.y, odomPose.orientation.z, odomPose.orientation.w]
+  (roll, pitch, yaw) = euler_from_quaternion(orientation_list)
+  current_angle = yaw
+  print(current_angle)
+  print(set_angle)
+  ang_velocity = 0.08
+  dRadian = (dAngle * (math.pi/180))
+  destAngle = angleCorrection(dAngle)
+  clockwise = True
+  if (dAngle < 0):
+    clockwise = True
+  else:
+    clockwise = False
+  print(destAngle)
+  while (not((current_angle > destAngle - 0.006) and (current_angle < destAngle + 0.006))):
+    # print("Current Angle: " + str(current_angle) + "DestAngle" + str(destAngle))
+    if (clockwise == True):
+      twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = -ang_velocity
+    else:
+      twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = ang_velocity
+    pub.publish(twist)
+    odomPose = rospy.wait_for_message('/odom', Odometry, None).pose.pose
+    orientation_list = [odomPose.orientation.x, odomPose.orientation.y, odomPose.orientation.z, odomPose.orientation.w]
+    (roll, pitch, yaw) = euler_from_quaternion(orientation_list)
+    current_angle = yaw
+  twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0.0
+  pub.publish(twist)
+  print("Stopped")
+
+
+def etaCalc(colour):
+  if (colour is 'white'):
+    etaSum = 0
+    for i in range(len(pxz)):
+      num = whiteGrid[i] * pxz[i]
+      etaSum = etaSum + num
+    return (1 / etaSum)
+  else:
+    etaSum = 0
+    for i in range(len(pxz)):
+      num = blackGrid[i] * pxz[i]
+      etaSum = etaSum + num
+    return (1 / etaSum)
+
+pxz = [0.04166667]*24
+whiteGrid = [0.9,0.1,0.1,0.9,0.9,0.1,0.1,0.1,0.9,0.9,0.1,0.1,0.1,0.9,0.1,0.1,0.9,0.9,0.1,0.1,0.1,0.9,0.1,0.1]
+blackGrid = [0.1,0.9,0.9,0.1,0.1,0.9,0.9,0.9,0.1,0.1,0.9,0.9,0.9,0.1,0.9,0.9,0.1,0.1,0.9,0.9,0.9,0.1,0.9,0.9]
+forward = [0]*24
+backward = [0]*24
+
+def getColour():
+  value = rospy.wait_for_message('/light_sensor_plugin/leftLightSensor', Illuminance, None).illuminance
+  if(value > 210):
+    return 'white'
+  elif(value < 180):
+    return 'black'
+  else:
+    return 'none'
+
+def updateForwardGrid():
+  for i in range(len(pxz)):
+    if (i is 0):
+      forward[i] = 0
+    else:
+      forward[i] = pxz[i-1]
+
+def updateBackwardGrid():
+  for i in range(len(pxz)):
+    if (i is len(pxz) - 1):
+      backward[i] = 0
+    else:
+      backward[i] = pxz[i+1]
+
+def bayesFilterStationary(belief, colour):
+  previousBel = belief
+  eta = 0
+  for i in range(len(belief)):
+    if (colour is 'white'):
+      pxz[i] = whiteGrid[i] * previousBel[i]
+    else:
+      pxz[i] = blackGrid[i] * previousBel[i]
+    eta = eta + pxz[i]
+  for i in range(len(belief)):
+    pxz[i] = (1 / eta) * pxz[i]
+
+def bayesFilterMoving(direction, colour):
+  eta = 0
+  if (direction is 'forward'):
+    updateForwardGrid()
+    for i in range(len(pxz)):
+      if (colour is 'white'):
+        pxz[i] = whiteGrid[i] * forward[i]
+      else:
+        pxz[i] = blackGrid[i] * forward[i]
+      eta = eta + pxz[i]
+    for i in range(len(pxz)):
+      pxz[i] = (1 / eta) * pxz[i]
+  else:
+    updateBackwardGrid()
+    for i in range(len(pxz)):
+      if (colour is 'white'):
+        pxz[i] = whiteGrid[i] * backward[i]
+      else:
+        pxz[i] = blackGrid[i] * backward[i]
+      eta = eta + pxz[i]
+    for i in range(len(pxz)):
+      pxz[i] = (1 / eta) * pxz[i]  
+
+def moveForward():
+  move(0.1)
+  bayesFilterMoving('forward', getColour())
+  print(forward)
+  print(pxz)
+  print(sum(pxz))
+
+def moveBackward():
+  move(-0.1)
+  bayesFilterMoving('backward', getColour())
+  print(backward)
+  print(pxz)
+  print(sum(pxz))
+
+def indices(grid, ele):
+  return grid.index(ele) 
+
+def position(probGrid):
+  ele = max(probGrid)
+  if(ele in probGrid):
+    index = (indices(probGrid, ele)-1)
+    if(index is 0):
+      return 1
+    else:
+      return index
+  else:
+    return 0
+
+def localise():
+  print("Forward")
+  moveForward()
+  print("Forward")
+  moveForward()
+  print("Forward")
+  moveForward()
+  print("Forward")
+  moveForward()
+  print("Backward")
+  moveBackward()
+  print("Backward")
+  moveBackward()
+  print("Backward")
+  moveBackward()
+  print("Backward")
+  moveBackward()
+  print("Backward")
+  moveBackward()
+  print("Backward")
+  moveBackward()
+  print("Backward")
+  moveBackward()
+  print("Backward")
+  moveBackward()
+  print("Forward")
+  moveForward()
+  print("Forward")
+  moveForward()
+  print("Forward")
+  moveForward()
+  print("Forward")
+  moveForward()
+
+  print("Position of the robot: " + str(position(pxz)) + " cell.")
+  return position(pxz)
+    
+
+class Node:
+    def __init__(self, parent=None, position=None):
+        self.parent = parent
+        self.position = position
+
+        self.g = 0
+        self.h = 0
+        self.f = 0
+    def __eq__(self, other):
+        return self.position == other.position
+
+grid = [[0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,1,0,0,0,0,0,0,0],    # [3, 4] - location of the goal
+        [0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0],
+        [1,1,0,1,0,0,0,0,1,1,1,1],    # 1 - location of the obstacles
+        [1,1,0,1,1,1,1,1,1,1,1,1],
+        [0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0],    # location of the robot - using localisation
+        [0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0,0,0,0,0,0]]
+
+return_grid = [[0,0,0,0,0,0,0,0,0,0,0,0],
+               [0,0,0,0,0,0,0,0,0,0,0,0],
+               [0,0,0,0,0,0,0,0,0,0,0,0],
+               [0,0,0,0,0,0,0,0,0,0,0,0],
+               [0,0,0,0,0,0,0,0,0,0,0,0],    
+               [0,0,0,0,0,0,0,0,0,0,0,0],
+               [0,0,0,0,0,0,0,0,0,0,0,0],
+               [0,0,0,0,0,0,0,0,0,0,0,0],
+               [0,0,0,0,0,0,0,0,0,0,0,0],
+               [1,1,0,0,1,1,1,1,1,1,1,1],    # 1 - location of the obstacles
+               [1,1,0,0,1,1,1,1,1,1,1,1],
+               [0,0,0,0,0,0,0,0,0,0,0,0],    # location of the robot - using fixed
+               [0,0,0,0,0,0,0,0,0,0,0,0],
+               [0,0,0,0,0,0,0,1,0,0,0,0],
+               [0,0,0,0,0,0,0,0,0,0,0,0],
+               [0,0,0,0,0,0,0,0,0,0,0,0],
+               [0,0,0,0,0,0,0,0,0,0,0,0],
+               [0,0,0,0,0,0,0,0,0,0,0,0]]
+(numrows, numcols) = np.shape(grid)
+end = [4, 3] # ending position - give [y,x]
+cost = 1 # cost per movement - for g[n]
+
+def print_grid(path):
+    try:
+        print('\n'.join([''.join(["{:" ">3d}".format(ele) for ele in row]) for row in path]))
+    except:
+        print("No path")
+
+def find_path(current_node, grid):
+    path = []
+    result = grid 
+    current = current_node
+    while current is not None:
+        path.append(current.position)
+        current = current.parent
+    path = path[::-1]
+    print("Path: " + str(path))
+    for i in range(len(path)):
+        result[path[i][0]][path[i][1]] = 5
+    print_grid(result)
+    return path
+
+def hn(x, y, goal_x, goal_y):
+    return (abs(x - goal_x) + abs(y - goal_y)) 
+
+def plan(grid, cost, start, goal):
+    start_node = Node(None, tuple(start))
+    goal_node = Node(None, tuple(goal))
+
+    start_node.g = 0 
+    start_node.h = 0
+    start_node.f = 0
+
+    goal_node.g = 0 
+    goal_node.h = 0
+    goal_node.f = 0
+
+    openlist = []  
+    closedlist = [] 
+    
+    openlist.append(start_node)
+
+    move  =  [[-1, 0 ], # go up
+              [ 0, -1], # go left
+              [ 1, 0 ], # go down
+              [ 0, 1 ]] # go right
+        
+    while len(openlist) > 0:
+        current_node = openlist[0]
+        current_index = 0
+        for i, ele in enumerate(openlist):
+            if (ele.f < current_node.f):
+                current_node = ele
+                current_index = i
+                
+        openlist.pop(current_index)
+        closedlist.append(current_node)
+
+        if (current_node == goal_node):
+            return find_path(current_node,grid)
+
+        neighbours = []
+        for new_pos in move: 
+            node_pos = (current_node.position[0] + new_pos[0], current_node.position[1] + new_pos[1])
+            if (node_pos[0] > (numrows - 1) or node_pos[0] < 0 or node_pos[1] > (numcols -1) or node_pos[1] < 0):
+                continue
+            if (grid[node_pos[0]][node_pos[1]] != 0):
+                continue
+            new_node = Node(current_node, node_pos)
+            neighbours.append(new_node)
+
+        for neighbour in neighbours:            
+            if len([i for i in closedlist if i == neighbour]) > 0:
+                continue
+            neighbour.g = current_node.g + cost
+            neighbour.h = hn(neighbour.position[0], neighbour.position[1], goal_node.position[0], goal_node.position[1])
+            neighbour.f = neighbour.g + neighbour.h
+            if len([i for i in openlist if neighbour == i and neighbour.g > i.g]) > 0:
+                continue
+            openlist.append(neighbour)
+
+def getRobotStartLocation(cell):
+  if (cell == 0): 
+    return [15, 6]
+  elif (cell <= 4):
+    return [14, 6]
+  elif (cell <= 7):
+    return [13, 6]
+  elif (cell <= 10):
+    return [12, 6]
+  elif (cell <= 14):
+    return [11, 6]
+  elif (cell <= 18):
+    return [10, 6]
+  elif (cell <= 22):
+    return [9, 6] 
+
+def offset(cell, desCell):
+  print("Offsetting to 12")
+  move((desCell - cell)*0.1)
+  return desCell
+  
+def Astar_path_planning():
+  cell = localise()
+  cell = offset(cell, 12)
+  start = getRobotStartLocation(cell)
+  pos = 'middle'
+  if(pos == 'right'):
+        # right most obs
+        print("right")
+        modifyGrid(grid, 2, 7, 1)
+        modifyGrid(grid, 2, 8, 1)
+        modifyGrid(grid, 4, 8, 0)
+        modifyGrid(grid, 3, 7, 0)
+        modifyGrid(grid, 3, 8, 0)
+        path = plan(grid,cost, start, end)
+  elif(pos == 'left'):
+        # left most obs
+        print("left")
+        modifyGrid(grid, 2, 7, 1)
+        modifyGrid(grid, 2, 8, 1)
+        modifyGrid(grid, 1, 7, 0)
+        modifyGrid(grid, 1, 8, 0)
+        modifyGrid(grid, 0, 8, 0)
+        modifyGrid(grid, 0, 7, 0)
+        path = plan(grid,cost, start, end)
+  elif(pos == 'middle'):
+        # middle obs
+        print("middle")
+        path = plan(grid,cost, start, end)
+  filtered = filterPath(path, start)
+  followPath(filtered)
+  colour = park()
+  return_a_star(colour, start)
+
+def modifyGrid(grid, x, y, val):
+      grid[y][x] = val
+
+def return_a_star(colour, goal): 
+  start = [12, 8]
+  goal = [1, goal[1]-1]# [numrows-goal[0]-1, goal[1]-1]
+  
+  if(colour is 'purple'):
+    modifyGrid(return_grid, 0, 9, 1)
+    modifyGrid(return_grid, 0, 10, 1)
+    modifyGrid(return_grid, 1, 9, 1)
+    modifyGrid(return_grid, 1, 10, 1)
+    modifyGrid(return_grid, 2, 9, 0)
+    modifyGrid(return_grid, 2, 10, 0)
+    modifyGrid(return_grid, 3, 9, 0)
+    modifyGrid(return_grid, 3, 10, 0)
+    path = plan(return_grid, cost, start, goal)
+    filtered = filterPath(path, start)
+    followPath(filtered)
+  elif(colour is 'orange'):
+    modifyGrid(return_grid, 0, 9, 0)
+    modifyGrid(return_grid, 0, 10, 0)
+    modifyGrid(return_grid, 1, 9, 0)
+    modifyGrid(return_grid, 1, 10, 0)
+    modifyGrid(return_grid, 2, 9, 1)
+    modifyGrid(return_grid, 2, 10, 1)
+    modifyGrid(return_grid, 3, 9, 1)
+    modifyGrid(return_grid, 3, 10, 1)
+    path = plan(return_grid, cost, start, goal)
+    filtered = filterPath(path, start)
+    followPath(filtered)
+  move(0.1)
+  rotate(180)
+
+# up = 0, down = 6, right = 3, left = 9
+def filterPath(path, start):
+  filteredPath = []
+  currentX = start[1] # 6
+  currentY = start[0] # 11
+  for node in path:
+    if (currentX - node[1] == -1): # right
+      filteredPath.append(3)
+    elif ((currentX - node[1]) == 1): # left
+      filteredPath.append(9)
+    elif ((currentY - node[0]) == 1): # up
+      filteredPath.append(0)
+    elif ((currentY - node[0]) == -1): # down
+      filteredPath.append(6) 
+    currentX = node[1]
+    currentY = node[0]
+  print("filterpath: " + str(filteredPath))
+  return filteredPath
+  
+def followPath(path):
+  prevStep = path[0]
+  for x in path:
+    if (x == 0): # move forwards
+      if (prevStep == 3):
+        # rotate left to face forward and move straight
+        # rotate -90 degrees
+        print("left and forwards")
+        rotate(90)
+        move(0.333333)
+      elif (prevStep == 9):
+        # rotate right to face forward and move straight
+        # rotate 90 degrees
+        print("right and forwards")
+        rotate(-90)
+        move(0.333333)
+      elif (prevStep == x):
+        print("forwards")
+        move(0.333333)
+    elif (x == 6): # move backwards
+      if (prevStep == 3):
+        # rotate left to face forward and move straight
+        # rotate -90 degrees
+        print("left and backwards")
+        rotate(90)
+        move(0.333333)
+      elif (prevStep == 9):
+        # rotate right to face forward and move straight
+        # rotate 90 degrees
+        print("right and backwards")
+        rotate(-90)
+        move(0.333333)
+      elif (prevStep == x):
+        print("backwards")
+        move(-0.333333)
+    elif (x == 3): # move right
+      if (prevStep == 0 or prevStep == 6):
+        # rotate right to face right and move straight
+        # rotate 90 degrees
+        print("right")
+        rotate(-90)
+        move(0.333333)
+      elif (prevStep == x):
+        print("right")
+        move(0.333333)
+    elif (x == 9): # move left
+      if (prevStep == 0 or prevStep == 6):
+        # rotate left to face left and move straight
+        # rotate -90 degrees
+        print("left")
+        rotate(90)
+        move(0.333333)
+      elif (prevStep == x):
+        print("left")
+        move(0.333333)
+
+    prevStep = x
+  if (prevStep == 3):
+    rotate(90)
+  elif (prevStep == 9):
+    rotate(-90)
+
+def park():
+  print("Its time to park lads")
+  move(0.1)
+  rotate(-50)
+  # move(1)
+  bumped = False
+  steps = 1
+  colour = ''
+  while (not bumped):
+    bumperValue = rospy.wait_for_message('/bumper_link_contact', ContactsState, None).states
+    if (not bumperValue):
+      move(0.1)
+      steps += 1
+    else:
+      print("STOPPPPP HITTING MEEEEEEEE, BEEEEPPPPP!")
+      bumped = True
+
+  colorDetected = False
+  while (not colorDetected):
+    value = rospy.wait_for_message('/light_sensor_plugin/leftLightSensor', Illuminance, None).illuminance
+    # 177 orange
+    # 144 purple
+    if(value >= 133 and value <= 150):
+      print("purple detected")
+      colorDetected = True
+      colour = 'purple'
+    elif(value <= 185 and value >= 172):
+      print("orange detected")
+      colorDetected = True
+      colour = 'orange'
+    else:
+      print("NOPE TRY AGAIN")
+  print("OKAY BUDDY, NOW BACK IT UPP")
+  move((-0.1*steps)-0.3)
+  rotate(-40)
+  move(0.5)
+  rotate(-90)
+  print("LETS GO BACK TO WHERE WE BELONGG")
+  return colour
+
+if __name__=="__main__":
+
+    status = 0
+    target_linear_vel   = 0.0
+    target_angular_vel  = 0.0
+    control_linear_vel  = 0.0
+    control_angular_vel = 0.0
+
+    print(msg)
+    while(1):
+        key = getKey()
+        if key == 'w' :
+            print("Forward")
+            move(0.5)
+            status = status+1
+        elif (key == 's') :
+            print("Backward")
+            move(-0.2)
+            status = status+1
+        elif (key == 'a') :
+            print("Left")
+            rotate(90)
+            status = status+1
+        elif (key == 'd') :
+            print("Right")
+            rotate(-90)
+            status = status+1
+        elif (key == 'l') :
+            print("Localisation")
+            localise()
+            status = status+1
+        elif (key == 'p') :
+            print("Planning the whole simulation")
+            Astar_path_planning()
+            status = status+1
+        elif (key == 'b') :
+            print("It's parking time")
+            park()
+            status = status+1  
+        elif (key == 'r') :
+            print("Testing return path") 
+            return_a_star('orange', end)
+            status = status+1
+        else:
+            if (key == '\x03'):
+                break
+        if (status == 20) :
+            print(msg)
+            status = 0
+    if os.name != 'nt':
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)

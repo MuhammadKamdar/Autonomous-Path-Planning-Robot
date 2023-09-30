@@ -1,0 +1,135 @@
+import numpy as np
+
+class Node:
+    def __init__(self, parent=None, position=None):
+        self.parent = parent
+        self.position = position
+
+        self.g = 0
+        self.h = 0
+        self.f = 0
+    def __eq__(self, other):
+        return self.position == other.position
+
+grid = [[0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0],    # [3, 4] - location of the goal
+        [0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0],
+        [1,1,0,1,1,0,0],    # 1 - location of the obstacles
+        [1,1,0,1,1,1,1],
+        [0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0],    # [6,11] - location of the robot
+        [0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0],
+        [0,0,0,0,0,0,0]]
+
+(numrows, numcols) = np.shape(grid)
+
+start = [11, 6] # starting position - give [y,x]
+end = [4, 3] # ending position - give [y,x]
+cost = 1 # cost per movement - for g[n]
+
+start_node = Node(None, tuple(start))
+start_node.g = 0 
+start_node.h = 0
+start_node.f = 0
+
+goal_node = Node(None, tuple(end))
+goal_node.g = 0 
+goal_node.h = 0
+goal_node.f = 0
+
+open_list = []  
+closed_list = [] 
+
+move  =  [[-1, 0], # go up
+          [0, -1], # go left
+          [1, 0], # go down
+          [0, 1]] # go right
+
+def path(current_node, grid):
+    path = []
+    result = grid #[[1 for i in range(numcols)] for j in range(numrows)]
+    current = current_node
+    while current is not None:
+        path.append(current.position)
+        current = current.parent
+    path = path[::-1] # reversing the path
+    print("path: " + str(path))
+    for i in range(len(path)):
+        result[path[i][0]][path[i][1]] = 5
+    # print_grid(result)
+    # print("==========================")
+    
+    return result
+
+def update_neighbours(grid, neighbours, current_node):
+    for new_pos in move: 
+        node_pos = (current_node.position[0] + new_pos[0], current_node.position[1] + new_pos[1])
+        if(node_pos[0] > (numrows - 1) or node_pos[0] < 0 or 
+            node_pos[1] > (numcols -1) or node_pos[1] < 0):
+            continue
+        if(grid[node_pos[0]][node_pos[1]] != 0):
+            continue
+        new_node = Node(current_node, node_pos)
+        neighbours.append(new_node)
+
+def hn(x, y, goal_x, goal_y):
+    return (abs(x - goal_x) + abs(y - goal_y)) 
+
+def update_fn(current_node, neighbours):
+    for neighbour in neighbours:
+        if(len([i for i in closed_list if i == neighbour]) > 0):
+            continue
+        neighbour.g = current_node.g + cost # g[n]
+        neighbour.h = hn(neighbour.position[0], neighbour.position[1], goal_node.position[0], goal_node.position[1]) # h[n]
+        neighbour.f = neighbour.g + neighbour.h # f[n]
+
+        if(len([i for i in open_list if neighbour == i and neighbour.g > i.g]) > 0):
+            continue
+        open_list.append(neighbour)
+
+def plan(grid):
+    open_list.append(start_node)
+    while(len(open_list) > 0):
+        current_node = open_list[0]
+        current_index = 0
+        for i, elem in enumerate(open_list):
+            if elem.f < current_node.f:
+                current_node = elem
+                current_index = i
+
+        open_list.pop(current_index)
+        closed_list.append(current_node)
+
+        if current_node == goal_node:
+            return path(current_node, grid)
+
+        neighbours = []
+        update_neighbours(grid, neighbours, current_node)
+        update_fn(current_node, neighbours)
+
+def print_grid(path):
+    try:
+        print('\n'.join([''.join(["{:" ">3d}".format(ele) for ele in row]) for row in path]))
+        # for i in range(len(path)):
+        #     print(path[i])
+    except:
+        print("No path")
+
+def Astar_path_planning():
+    path = plan(grid)
+    print_grid(path)
+
+if __name__ == '__main__':
+    Astar_path_planning()
+    
+    
+
